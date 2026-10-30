@@ -77,8 +77,9 @@ Usage:
   claude-spawn plan             Show what 'install' and 'hub' will put on this computer, changing nothing
   claude-spawn list | url <name> | stop <name|all>
   claude-spawn trust <git-folder> Approve a repo to run sessions (only after the user has said yes)
+  claude-spawn untrust <folder> Withdraw an approval
   claude-spawn doctor           Check that everything is healthy
-  claude-spawn uninstall [--hub-folder] [--config] [--logs]
+  claude-spawn uninstall [--hub-folder] [--config] [--logs] [--untrust]
 EOF
 }
 
@@ -225,13 +226,13 @@ manual_trust_msg() {
   echo "To approve it by hand: open a terminal, run  cd '$1' && claude  and choose Yes at the trust prompt, then type /exit." >&2
 }
 
-# Same effect as accepting the trust dialog. Atomic, symlink-safe. Returns 3 if jq is missing
-# (caller shows the manual steps), 1 on any other failure. Callers run it as `trust x || rc=$?`,
-# which switches errexit off in here, so every step checks itself.
-# The first call keeps a copy of the original file (~/.claude.json.pocket-claude.bak).
-trust() {
+# Same effect as accepting (true) or withdrawing (false) the trust dialog. Atomic, symlink-safe.
+# Returns 3 if jq is missing (caller shows the manual steps), 1 on any other failure. Callers run it
+# as `x || rc=$?`, which switches errexit off in here, so every step checks itself.
+# The first change keeps a copy of the original file (~/.claude.json.pocket-claude.bak).
+set_trust() {
   local cfg="$claude_json" tmp
-  [ "$1" != / ] && [ "$1" != "$HOME" ] || { echo "Refusing to trust '$1' (too broad)." >&2; return 1; }
+  [ "$1" != / ] && [ "$1" != "$HOME" ] || { echo "Refusing to change trust for '$1' (too broad)." >&2; return 1; }
   command -v jq >/dev/null 2>&1 || return 3
   if [ -L "$cfg" ]; then
     cfg=$(readlink "$cfg")
@@ -241,16 +242,49 @@ trust() {
     jq -e . "$cfg" >/dev/null 2>&1 || { echo "~/.claude.json isn't valid JSON, so I'm not touching it." >&2; return 1; }
     [ -e "$cfg.pocket-claude.bak" ] || cp -p "$cfg" "$cfg.pocket-claude.bak" || return 1
   else
+    [ "$2" = true ] || return 0
     echo '{}' > "$cfg" || return 1
   fi
   tmp=$(mktemp "$cfg.XXXXXX") || return 1
-  if ! jq --arg p "$1" '.projects[$p] = ((.projects[$p] // {}) + {hasTrustDialogAccepted: true})' "$cfg" > "$tmp"; then
+  if ! jq --arg p "$1" --argjson v "$2" 'if $v or .projects[$p] then .projects[$p] = ((.projects[$p] // {}) + {hasTrustDialogAccepted: $v}) else . end' "$cfg" > "$tmp"; then
     rm -f "$tmp"; echo "Couldn't update ~/.claude.json; left it unchanged." >&2; return 1
   fi
   if ! { chmod 600 "$tmp" && mv "$tmp" "$cfg"; }; then
     rm -f "$tmp"; echo "Couldn't update ~/.claude.json; left it unchanged." >&2; return 1
   fi
+}
+
+# Fingerprint of everything in a folder that can run commands once trusted (regular files only).
+shipped_hash() {
+  local sum="sha256sum"; command -v sha256sum >/dev/null 2>&1 || sum="shasum -a 256"
+  ( cd "$1" || exit 1
+    [ ! -d .claude ] || find .claude -type f | LC_ALL=C sort | while IFS= read -r f; do echo "$f"; cat "$f"; done
+    for f in .mcp.json CLAUDE.md; do [ -f "$f" ] && [ ! -L "$f" ] && { echo "$f"; cat "$f"; }; done
+    true   # a missing file above must not fail the pipeline
+  ) | $sum | cut -d' ' -f1
+}
+hashfile="$statedir/approved.hashes"   # lines: <hash> <folder>
+stored_hash() { local h p; while read -r h p; do [ "$p" = "$1" ] && echo "$h"; done 2>/dev/null < "$hashfile" | tail -n 1; true; }
+record_hash() { drop_hash "$1"; echo "$2 $1" >> "$hashfile"; }   # folder hash
+drop_hash() { [ -f "$hashfile" ] || return 0; awk -v p="$1" '{ if (substr($0, length($1) + 2) != p) print }' "$hashfile" > "$hashfile.tmp" && mv "$hashfile.tmp" "$hashfile"; }
+
+trust() {
+  set_trust "$1" true || return $?
   echo "$1" >> "$statedir/trusted.list"
+  record_hash "$1" "$(shipped_hash "$1")"
+}
+untrust() { set_trust "$1" false || return $?; drop_hash "$1"; }
+
+# An approved project whose settings, hooks or instructions changed since approval must be approved again.
+check_unchanged() {
+  local now old
+  now=$(shipped_hash "$1"); old=$(stored_hash "$1")
+  if [ -z "$old" ]; then record_hash "$1" "$now"; return 0; fi   # approved elsewhere (e.g. in Claude Code itself): remember it as-is
+  [ "$old" != "$now" ] || return 0
+  echo "CHANGED: what $1 can run has changed since you approved it (for example after a git pull)." >&2
+  show_shipped "$1"
+  echo "Show the user what is above. Only if they say yes, run:  $here/claude-spawn trust '$1'" >&2
+  exit 2
 }
 
 # try_trust <folder>: returns only if trusting worked; otherwise prints why and exits.
@@ -305,6 +339,17 @@ derive_name() {
 
 ensure_installed() { [ -x "$share/bin/claude-spawn" ] || "$here/claude-spawn" install >/dev/null; }
 
+# One pocket-claude command that changes things at a time (a stale lock older than 5 minutes is ignored).
+lock() {
+  local i
+  for i in $(seq 120); do
+    if mkdir "$statedir/.lock" 2>/dev/null; then trap 'rmdir "$statedir/.lock" 2>/dev/null' EXIT; return 0; fi
+    find "$statedir/.lock" -maxdepth 0 -mmin +5 -exec rmdir {} \; 2>/dev/null || true
+    sleep 0.5
+  done
+  die "BUSY: another pocket-claude command is still running. Try again in a minute."
+}
+
 # Sourced by tests/smoke.sh: define everything, run nothing.
 if [ "${BASH_SOURCE[0]}" != "$0" ]; then return 0; fi
 
@@ -315,11 +360,12 @@ case "$cmd" in
     src=$(cd "$here/.." && pwd -P)
     if [ "$src" = "$share" ]; then echo "Already installed at $share"; exit 0; fi
     safe_path "$share" || die "Install folder path contains an unsupported character: $share"
-    mkdir -p "$share"
-    rm -rf "$share/bin" "$share/templates"
-    cp -R "$src/bin" "$src/templates" "$share/"
-    [ -f "$src/VERSION" ] && cp "$src/VERSION" "$share/VERSION"
-    chmod +x "$share/bin/claude-spawn"
+    mkdir -p "$(dirname "$share")"
+    new=$(mktemp -d "$share.new.XXXXXX")
+    cp -R "$src/bin" "$src/templates" "$new/" && { [ ! -f "$src/VERSION" ] || cp "$src/VERSION" "$new/VERSION"; } && chmod +x "$new/bin/claude-spawn" ||
+      { rm -rf "$new"; die "Install failed; the existing install was left alone."; }
+    rm -rf "$share.old"; [ ! -e "$share" ] || mv "$share" "$share.old"
+    mv "$new" "$share"; rm -rf "$share.old"
     echo "Installed to $share" ;;
 
   set)
@@ -357,6 +403,7 @@ case "$cmd" in
     if ! is_trusted "$hubroot"; then
       try_trust "$hubroot"
     fi
+    record_hash "$hubroot" "$(shipped_hash "$hubroot")"
     svc_install "$PC_HUB_NAME" "$hubroot" 1
     echo "$hubroot" > "$statedir/$PC_HUB_NAME.dir"
     if wait_url "$PC_HUB_NAME"; then
@@ -372,6 +419,7 @@ case "$cmd" in
   start)
     src="${2:-}"
     [ -n "$src" ] || { usage; exit 1; }
+    lock
     if [ -d "$src" ]; then
       dir=$(cd "$src" && pwd -P)
     else
@@ -411,7 +459,7 @@ case "$cmd" in
 
     if ! is_trusted "$root"; then
       # Auto-trust is an advanced opt-in, and never applies to a repo pocket-claude downloaded.
-      if [ "$PC_TRUST_UNDER_ROOT" = true ] && under_root "$root" && ! grep -qxF "$root" "$statedir/cloned.list" 2>/dev/null; then
+      if [ "$PC_TRUST_UNDER_ROOT" = true ] && under_root "$root" && ! grep -qixF "$root" "$statedir/cloned.list" 2>/dev/null; then
         echo "Trusting $root"
         show_shipped "$root"
         try_trust "$root"
@@ -423,6 +471,7 @@ case "$cmd" in
       fi
     fi
 
+    check_unchanged "$root"
     if svc_running "$name"; then
       echo "Already running: $name"
     else
@@ -453,10 +502,16 @@ case "$cmd" in
     try_trust "$root"
     echo "Trusted $root" ;;
 
+  untrust)
+    d="${2:?folder}"; [ -d "$d" ] || die "No such folder: $d"
+    root=$(repo_root "$d"); rc=0; untrust "$root" || rc=$?
+    case "$rc" in 0) echo "Withdrew approval for $root" ;; 3) echo "'jq' isn't installed, so I can't do this automatically." >&2; exit 2 ;; *) exit 1 ;; esac ;;
+
   run)  # this terminal only: no service, nothing persists
     d="${2:?folder}"; [ -d "$d" ] || die "No such folder: $d"
     root=$(repo_root "$d"); safe_path "$root" || die "UNSUPPORTED_PATH: '$root'"
     is_trusted "$root" || { echo "NOT_TRUSTED: $root hasn't been approved yet." >&2; show_shipped "$root"; echo "If the user says yes: $here/claude-spawn trust '$root'" >&2; exit 2; }
+    check_unchanged "$root"
     claude=$(claude_path); cd "$root"
     keep=""; [ "$os" != Darwin ] || keep="/usr/bin/caffeinate -is"   # best effort: awake while plugged in, only while this runs
     ma=""; [ "$PC_PERMISSION_MODE" = default ] || ma="--permission-mode $PC_PERMISSION_MODE"
@@ -513,8 +568,9 @@ EOF
     fi ;;
 
   doctor)
+    warns=0
     ok()   { echo "ok:   $*"; }
-    warn() { echo "WARN: $*"; }
+    warn() { echo "WARN: $*"; warns=$((warns + 1)); }
     if command -v claude >/dev/null 2>&1; then ok "claude $(claude --version 2>/dev/null | head -n 1)"; else warn "claude not found"; fi
     command -v git >/dev/null 2>&1 && ok "git" || warn "git not found"
     command -v jq  >/dev/null 2>&1 && ok "jq" || warn "jq not found (approving folders will need one manual step)"
@@ -536,13 +592,14 @@ EOF
     [ "$PC_PERMISSION_MODE" = default ] || warn "permission mode is '$PC_PERMISSION_MODE': the launcher's own instructions can be changed from the phone without asking"
     ! is_wsl || warn "this is WSL: a background launcher can't stay up here; use  claude-spawn run <folder>  in a terminal you leave open"
     [ "$os" != Darwin ] || ! pmset -g batt 2>/dev/null | grep -q InternalBattery || ok "laptop: keeps awake on power only; closing the lid pauses it"
-    ok "projects folder: $PC_ROOT, approvals: $PC_PERMISSION_MODE" ;;
+    ok "projects folder: $PC_ROOT, approvals: $PC_PERMISSION_MODE"
+    [ "$warns" -eq 0 ] || exit 1 ;;
 
   uninstall)
     shift
-    rm_hub=0; rm_cfg=0; rm_logs=0
+    rm_hub=0; rm_cfg=0; rm_logs=0; rm_trust=0
     for a in "$@"; do
-      case "$a" in --hub-folder) rm_hub=1 ;; --config) rm_cfg=1 ;; --logs) rm_logs=1 ;; *) die "Unknown option: $a" ;; esac
+      case "$a" in --hub-folder) rm_hub=1 ;; --config) rm_cfg=1 ;; --logs) rm_logs=1 ;; --untrust) rm_trust=1 ;; *) die "Unknown option: $a" ;; esac
     done
     for f in "$statedir"/*.dir; do
       [ -e "$f" ] || continue
@@ -554,10 +611,18 @@ EOF
     [ "$rm_cfg" = 0 ] || rm -rf "$cfgdir"
     [ "$rm_logs" = 0 ] || rm -rf "$logdir"
     if [ -s "$statedir/trusted.list" ]; then
-      echo "Folders still marked as trusted in ~/.claude.json (harmless; left in place):"
-      sort -u "$statedir/trusted.list" | sed 's/^/  /'
+      if [ "$rm_trust" = 1 ]; then
+        sort -u "$statedir/trusted.list" | while IFS= read -r d; do
+          rc=0; untrust "$d" || rc=$?
+          [ "$rc" = 0 ] && echo "Withdrew approval for $d" || echo "Couldn't withdraw approval for $d (rc=$rc)"
+        done
+      else
+        echo "Folders still marked as trusted in ~/.claude.json (left in place; run uninstall with --untrust to withdraw them):"
+        sort -u "$statedir/trusted.list" | sed 's/^/  /'
+      fi
     fi
-    rm -rf "$statedir"
+    # keep the list of downloaded projects unless everything is being wiped, so a reinstall still never auto-trusts them
+    if [ "$rm_cfg" = 1 ]; then rm -rf "$statedir"; else find "$statedir" -mindepth 1 ! -name cloned.list -delete 2>/dev/null || true; fi
     echo "Removed all pocket-claude services."
     [ ! -e "$claude_json.pocket-claude.bak" ] || echo "A copy of your original ~/.claude.json from before pocket-claude is at $claude_json.pocket-claude.bak (delete it if you like)."
     rm -rf "$share" ;;   # last: this script may be running from here

@@ -2,6 +2,8 @@
 
 **Start Claude Code on your own computer from your phone.**
 
+*v0.1, beta. Tested on one Mac so far; see "Known limits" below. Reports welcome as GitHub issues.*
+
 You, on your phone: *"give me a session in my website project"*
 Claude, a few seconds later: *"Here you go"* and a link. Tap it and you're working on the real project, on your own computer.
 
@@ -53,9 +55,17 @@ claude-spawn plan             show what will be put on this computer
 claude-spawn list             what's running
 claude-spawn stop <name|all>  stop sessions
 claude-spawn run <folder>     one session, this terminal only
+claude-spawn untrust <folder> withdraw an approval
 claude-spawn set permission-mode default|acceptEdits|plan
 claude-spawn uninstall        remove it all
 ```
+
+## Known limits
+
+- Closing a laptop lid or running on battery lets the computer sleep; your phone can't reach it until it wakes.
+- Linux and the always-on launcher have only been checked by reading the code, not run end to end on a real machine yet.
+- No Windows support. No signed releases yet.
+- A project's settings are checked again if they change after you approve it, but a project you approved earlier is trusted by folder, not by who wrote it.
 
 ## Tested on
 

@@ -52,4 +52,17 @@ command -v jq >/dev/null && {
   rc=0; trust "$T/proj" 2>/dev/null || rc=$?
   t "trust failure is not silent" "[ $rc -ne 0 ] && [ $rc -ne 3 ]"
 }
+# change detection and untrust
+mkdir -p "$T/g/.claude"; echo '{"a":1}' > "$T/g/.claude/settings.json"
+echo '{}' > "$T/real.json"
+command -v jq >/dev/null && {
+  trust "$T/g"
+  h1=$(stored_hash "$T/g")
+  t "hash recorded on trust"   "[ -n '$h1' ] && [ '$h1' = \"\$(shipped_hash '$T/g')\" ]"
+  echo '{"a":2}' > "$T/g/.claude/settings.json"
+  t "hash changes with edit"   "[ '$h1' != \"\$(shipped_hash '$T/g')\" ]"
+  untrust "$T/g"
+  t "untrust clears flag"      "[ \"\$(jq -r '.projects[\"$T/g\"].hasTrustDialogAccepted' '$T/real.json')\" = false ]"
+  t "untrust drops hash"       "[ -z \"\$(stored_hash '$T/g')\" ]"
+}
 exit $fail

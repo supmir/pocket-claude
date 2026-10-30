@@ -28,7 +28,7 @@ everything to a permanent place, so the temporary folder can be deleted afterwar
 
 ## Set up
 
-1. Run `CS doctor` (read-only). Fix what's missing:
+1. Run `CS doctor` (read-only; it exits 1 if anything needs attention, which is normal before setup). Fix what's missing:
    - `claude` missing or not logged in with a claude.ai account: walk them through it step by step (open Terminal, type `claude`, then `/login`); don't just say "in a terminal". This feature does not work with API keys.
    - `git` missing: say how to get it for their system.
    - `jq` missing (macOS 15+ already has it): used only to approve folders. On macOS with Homebrew `brew install jq` is fine to offer; on Linux give them `sudo apt install jq` (or the distro's equivalent) to run themselves. If they'd rather skip it, setup works with one manual step.
@@ -55,7 +55,7 @@ The script prints what the folder would run (settings, hooks, server commands, C
 the user in plain words what that is, quoting any hook or server commands, and say approving
 lets them run commands on this computer. Ask a clear yes/no. Only on a yes run
 `CS trust <folder>`. (Claude Code will also ask them to confirm that command; that's expected.)
-Then retry. If the script says `jq` is missing, give them the manual steps it prints.
+If the script says `CHANGED` instead, the project was approved before but its settings or instructions have changed since; explain that and ask again the same way. Then retry. If the script says `jq` is missing, give them the manual steps it prints.
 
 ## Check on it
 
@@ -71,7 +71,8 @@ signed out (`claude`, then `/login`). Relay any `WARN` lines in plain words.
 ## Remove
 
 Ask which of these they also want removed (plain words): the `pocket-claude-launcher` folder,
-saved settings, and the log files. The launcher and installed files are always removed. Then run
-`CS uninstall` with `--hub-folder`, `--config`, `--logs` as chosen. Pass on anything the script
+saved settings, the log files, and the approvals pocket-claude gave to projects (`--untrust`;
+without it the projects stay approved in Claude's settings, which is harmless). The launcher and installed files are always removed. Then run
+`CS uninstall` with `--hub-folder`, `--config`, `--logs`, `--untrust` as chosen. Pass on anything the script
 prints about folders still marked as approved and the backup of their original settings; both
 are harmless and can stay.
