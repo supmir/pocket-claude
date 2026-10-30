@@ -14,27 +14,11 @@ The **launcher** is one small always-on session. You open it on your phone and t
 
 ## Before you start (30 seconds)
 
-- **Your computer must be awake.** It tries to stay awake while running. A desktop, Mac mini or server is ideal. A **laptop works with the lid open and plugged in**; closing the lid pauses it.
-- **Anyone who can sign in to your claude.ai account (or holds your unlocked phone) can run commands on this computer.** Turn on two-step login.
-- **Work or school computer?** Ask first. This installs a background service that starts at login and restarts itself, and your organisation may have switched the feature off. No service wanted? See "Without a background service" below.
-- **Supported:** macOS (tested) and Linux with systemd (not tested yet). **Windows is not supported yet**; WSL may work.
-- You need [Claude Code](https://claude.com/claude-code) signed in with a **claude.ai account** (API keys don't work for this).
-
-## Install
-
-**Plugin (one step):** in Claude Code, run
-
-```
-/plugin install pocket-claude --marketplace supmir/pocket-claude
-```
-
-then say **"set up pocket-claude"**.
-
-**Or paste this** into Claude Code (the Code tab of the Claude desktop app, or `claude` in a terminal; not ordinary chat):
-
-> Set up pocket-claude: clone https://github.com/supmir/pocket-claude (tag v0.1.0) into a temporary folder, read skills/setup/SKILL.md, and follow it.
-
-Claude tells you in plain words what it will do, asks one question, and gives you a link. To undo everything later, say **"remove pocket-claude"**.
+- **Works on:** Mac (tested) and Linux (not tested yet). **Windows: not yet.** Windows users can try the no-install `run` mode inside WSL, see "Without a background service".
+- **You need Claude Code** signed in with a claude.ai plan that includes it (API keys don't work for this). In the Claude desktop app, that's the **Code** tab, next to Chat. If you don't see one, this isn't for you yet.
+- **Your computer has to be awake.** It stays awake while plugged in. A desktop, Mac mini or server is ideal. A **laptop works with the lid open and plugged in**. Closing the lid, or running on battery, lets it sleep, and then your phone can't reach it. That's a limit of laptops, not something software can fix.
+- **Whoever can sign in to your claude.ai account (or picks up your unlocked phone) can work on this computer.** Turn on two-step login.
+- **Work or school computer?** Check with your IT team first: this installs a small program that starts when you log in, and some organisations don't allow that or have switched this feature off. You can still try the no-install mode below.
 
 ## Using it
 
@@ -51,11 +35,15 @@ On your phone open claude.ai/code (or the Claude app, Code tab), pick the sessio
 
 ## Safety, in short
 
-A project you open a session in can run its own settings, hooks and tools on your computer, which is why Claude Code asks you to trust a folder first. pocket-claude keeps that question with you: when a project isn't approved yet it shows what the project would run, and asks. Details, and what it can't protect against, in [SECURITY.md](SECURITY.md). If you ever open projects you don't control, keep the default (ask every time).
+A project can ship its own settings and commands ("hooks") that run on your computer, which is why Claude Code asks you to trust a folder first. pocket-claude keeps that question with you: when a project isn't approved yet it shows what the project would run, and asks. Details, and what it can't protect against, in [SECURITY.md](SECURITY.md). If you ever open projects you don't control, keep the default (ask every time).
 
 ## Without a background service
 
-`claude-spawn run <project-folder>` starts one session in the current terminal only. Nothing is installed or left behind; it ends when you close the terminal.
+`claude-spawn run <project-folder>` starts one session from a terminal on that computer. No background service, no launcher folder; it stops when you close the terminal (and keeps the Mac awake only while it runs). The project needs a one-time approval first. This is also the way to try it in WSL on Windows, with the terminal left open. Ask Claude to run it for you.
+
+## For your IT or security team
+
+Remote Control makes outbound HTTPS connections to claude.ai only; nothing listens on your computer. Your claude.ai login is the key: anyone with it can start sessions that run as you. pocket-claude adds a user-level service (no admin rights, no `sudo`), a few files, and trust entries in `~/.claude.json`. [SECURITY.md](SECURITY.md) lists every file and path, and `claude-spawn plan` prints them for your machine.
 
 ## Commands (Claude runs these for you)
 

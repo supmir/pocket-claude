@@ -24,12 +24,12 @@ directory to build the path). If you were told to fetch pocket-claude from GitHu
 tagged release to a temporary folder and read this file from there. `CS install` copies
 everything to a permanent place, so the temporary folder can be deleted afterwards.
 
-**Windows isn't supported yet.** Say so kindly; WSL (Linux inside Windows) may work, untested.
+**Windows isn't supported yet.** Say so kindly. In WSL (Linux inside Windows) the always-on launcher can't stay up, but `CS run <project folder>` works in a WSL terminal they leave open; offer that, and don't talk them out of trying.
 
 ## Set up
 
 1. Run `CS doctor` (read-only). Fix what's missing:
-   - `claude` missing or not logged in with a claude.ai account: tell them to run `claude`, then `/login`, in a terminal. This feature does not work with API keys.
+   - `claude` missing or not logged in with a claude.ai account: walk them through it step by step (open Terminal, type `claude`, then `/login`); don't just say "in a terminal". This feature does not work with API keys.
    - `git` missing: say how to get it for their system.
    - `jq` missing (macOS 15+ already has it): used only to approve folders. On macOS with Homebrew `brew install jq` is fine to offer; on Linux give them `sudo apt install jq` (or the distro's equivalent) to run themselves. If they'd rather skip it, setup works with one manual step.
 2. Ask in one line if this is a work or school computer. If yes, say it installs a background service that starts at login, and that their organisation may not allow it; offer the no-service option: `CS run <project folder>` starts one session in this terminal only and leaves nothing behind. Stop there if they pick that.
@@ -45,7 +45,7 @@ everything to a permanent place, so the temporary folder can be deleted afterwar
    - They can undo everything by saying "remove pocket-claude".
 5. After the yes: `CS install`, then `CS set root <folder>` if not the default, then `CS hub`.
 6. Give them: the link it prints, and how to use it. On the phone, open claude.ai/code or the Claude app (Code tab), choose the session named like `<computer>-launcher`, and say "give me a session in my website project".
-   - On Linux the output may include a note about staying logged in; relay the exact `sudo loginctl enable-linger ...` command for them to run if they want it always on.
+   - On Linux, `plan` shows an `enable-linger` command. Without it the launcher stops when the last login ends and doesn't start after a reboot, which matters on a server. Tell them before the question and give the exact command for them to run.
    - On macOS, the first time a session touches Desktop, Documents or iCloud folders, a pop-up appears **on the Mac** that can't be tapped from the phone. Suggest they do one thing in each of those folders while at the Mac, or keep projects elsewhere.
    - If the output says the launcher needs approving, explain it in one sentence and follow "Approving a folder".
 

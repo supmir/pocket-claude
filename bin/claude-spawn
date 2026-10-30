@@ -8,6 +8,7 @@ shopt -u patsub_replacement 2>/dev/null || true   # bash 5.2: '&' in a replaceme
 os=$(uname -s)
 case "$os" in Darwin|Linux) ;; *) echo "Unsupported OS: $os (Windows: use WSL)" >&2; exit 1 ;; esac
 
+is_wsl() { grep -qi microsoft /proc/version 2>/dev/null; }
 die() { echo "$1" >&2; exit "${2:-1}"; }
 
 here=$(cd "$(dirname "$0")" && pwd -P)
@@ -26,7 +27,7 @@ else
   logdir="${XDG_STATE_HOME:-$HOME/.local/state}/pocket-claude/logs"
   unitdir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 fi
-(umask 077; mkdir -p "$logdir" "$statedir")
+case "${1:-}" in plan|run) ;; *) (umask 077; mkdir -p "$logdir" "$statedir") ;; esac
 
 # ---------- validation (names and paths end up in plists, unit files and clone targets) ----------
 name_re='^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
@@ -126,7 +127,7 @@ if [ "$os" = Darwin ]; then
   </array>
   <key>WorkingDirectory</key><string>$2</string>
   <key>EnvironmentVariables</key><dict>
-    <key>PATH</key><string>$(dirname "$claude"):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>PATH</key><string>$(dirname "$claude"):$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>HOME</key><string>$HOME</string>
   </dict>
   $keep
@@ -144,7 +145,7 @@ else
     [ -n "${XDG_RUNTIME_DIR:-}" ] || export XDG_RUNTIME_DIR="/run/user/$uid"
     [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ] || export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
     systemctl --user show-environment >/dev/null 2>&1 ||
-      die "NO_SERVICE_MANAGER: this computer's per-user service manager isn't reachable (a container, or a connection without a login session). Log in normally or via a fresh SSH session, then try again. On a server you reach over SSH, an admin may first need: sudo loginctl enable-linger $USER"
+      die "NO_SERVICE_MANAGER: this computer's per-user service manager isn't reachable (a container, or a connection without a login session). Log in normally or via a fresh SSH session, then try again. On a server you reach over SSH, an admin may first need: sudo loginctl enable-linger ${USER:-$(id -un)}"
   }
   svc_running() { linux_preflight; systemctl --user is-active --quiet "$(sid "$1").service"; }
   svc_stop() { linux_preflight; systemctl --user stop "$(sid "$1").service" 2>/dev/null || true; }
@@ -160,12 +161,13 @@ else
   }
   svc_install() { # name dir persistent
     local claude inh="" modeargs=""
+    is_wsl && die "WSL_UNSUPPORTED: Windows' Linux (WSL) shuts down when no terminal is open, so a background launcher can't stay up. Use: claude-spawn run <project folder> in a WSL terminal and leave it open."
     linux_preflight
     claude=$(claude_path)
     safe_path "$claude" || die "The path to claude contains an unsupported character: $claude"
     safe_path "$2" || die "UNSUPPORTED_PATH: '$2' contains a character this tool can't handle safely (quotes, & < > % \$ backslash)."
     # Only block sleep on desktops; servers don't sleep, and logind may refuse inside containers.
-    if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v systemd-inhibit >/dev/null 2>&1; then
+    if ! is_wsl && [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v systemd-inhibit >/dev/null 2>&1; then
       inh="\"$(command -v systemd-inhibit)\" --what=idle:sleep --why=pocket-claude "
     fi
     [ "$PC_PERMISSION_MODE" = default ] || modeargs=" --permission-mode $PC_PERMISSION_MODE"
@@ -176,7 +178,7 @@ Description=Claude Code Remote Control ($1)
 
 [Service]
 WorkingDirectory=$2
-Environment="PATH=$(dirname "$claude"):/usr/local/bin:/usr/bin:/bin"
+Environment="PATH=$(dirname "$claude"):$HOME/.local/bin:$HOME/.cargo/bin:$HOME/go/bin:/usr/local/bin:/usr/bin:/bin:/snap/bin"
 ExecStart=/bin/sh -c ': > "\$\$1"; shift; exec "\$\$@"' sh "$(logf "$1")" ${inh}"$claude" remote-control --name $1$modeargs
 Restart=$([ "$3" = 1 ] && echo always || echo on-failure)
 RestartSec=30
@@ -262,15 +264,18 @@ try_trust() {
   esac
 }
 
-# What a folder would be allowed to run, shown before anyone says yes.
+# What a folder would be allowed to run, shown before anyone says yes. Whole files (up to 20 KB),
+# symlinks skipped (they could point at private files), control characters removed.
 show_shipped() {
   local f
   for f in .claude/settings.json .claude/settings.local.json .mcp.json CLAUDE.md; do
     [ -f "$1/$f" ] || continue
-    echo "--- $f (first lines) ---" >&2
-    head -c 700 "$1/$f" | strip_ansi >&2; echo >&2
+    if [ -L "$1/$f" ]; then echo "--- $f is a symlink (not shown; treat as suspicious) ---" >&2; continue; fi
+    echo "--- $f ---" >&2
+    head -c 20000 "$1/$f" | tr -d '\000-\010\013-\037\177' >&2; echo >&2
+    [ "$(wc -c < "$1/$f")" -le 20000 ] || echo "(file continues beyond what is shown here)" >&2
   done
-  [ ! -d "$1/.claude" ] || echo "--- .claude contains: $(ls -A "$1/.claude" | tr '\n' ' ')" >&2
+  [ ! -d "$1/.claude" ] || echo "--- .claude contains: $(ls -A "$1/.claude" | tr -d '\000-\037\177' | tr '\n' ' ')" >&2
 }
 
 # Fill {{HUB_NAME}} {{ROOT}} {{SPAWN}} in a template file (no sed: values are never interpreted).
@@ -290,6 +295,7 @@ derive_name() {
   name=$(printf '%s' "$rel" | sed -e 's/[^A-Za-z0-9_.-]/-/g' -e 's/^[-.]*//' | cut -c1-40)
   [ -n "$name" ] || name=repo
   name="$PC_MACHINE-$name"   # tells sessions apart when several computers use one account
+  [ "$name" != "$PC_HUB_NAME" ] || name="$name-project"
   if [ -f "$statedir/$name.dir" ] && [ "$(cat "$statedir/$name.dir")" != "$root" ]; then
     h=$(printf '%s' "$root" | cksum | cut -d' ' -f1 | cut -c1-6)
     name="$name-$h"
@@ -372,6 +378,16 @@ case "$cmd" in
       dest="${3:-$(basename "$src" .git)}"
       safe_dest "$dest" || die "BAD_DESTINATION: '$dest' isn't a valid folder name."
       dir="$PC_ROOT/$dest"
+      # No symlinks and no existing project (.git) on the way down: a clone can't land inside
+      # another project, the launcher's folder, or anywhere a link points.
+      walk="$PC_ROOT"; rest=${dest%/*}; [ "$rest" != "$dest" ] || rest=""
+      [ ! -L "$PC_ROOT" ] || die "BAD_DESTINATION: the projects folder is a symlink."
+      IFS=/ read -r -a parts <<< "$rest" || true
+      for part in ${parts[@]+"${parts[@]}"}; do
+        walk="$walk/$part"
+        if [ -L "$walk" ] || [ -e "$walk/.git" ]; then die "BAD_DESTINATION: '$dest' passes through a link or an existing project."; fi
+      done
+      [ ! -e "$PC_ROOT/.git" ] || die "BAD_DESTINATION: the projects folder is itself a git project."
       if [ ! -d "$dir" ]; then
         mkdir -p "$(dirname "$dir")"
         if [[ "$src" =~ $slug_re ]]; then
@@ -440,10 +456,11 @@ case "$cmd" in
   run)  # this terminal only: no service, nothing persists
     d="${2:?folder}"; [ -d "$d" ] || die "No such folder: $d"
     root=$(repo_root "$d"); safe_path "$root" || die "UNSUPPORTED_PATH: '$root'"
-    is_trusted "$root" || { echo "NOT_TRUSTED: $root hasn't been approved yet (see: claude-spawn start)." >&2; show_shipped "$root"; exit 2; }
+    is_trusted "$root" || { echo "NOT_TRUSTED: $root hasn't been approved yet." >&2; show_shipped "$root"; echo "If the user says yes: $here/claude-spawn trust '$root'" >&2; exit 2; }
     claude=$(claude_path); cd "$root"
-    if [ "$PC_PERMISSION_MODE" = default ]; then exec "$claude" remote-control --name "$(derive_name "$root")"; fi
-    exec "$claude" remote-control --name "$(derive_name "$root")" --permission-mode "$PC_PERMISSION_MODE" ;;
+    keep=""; [ "$os" != Darwin ] || keep="/usr/bin/caffeinate -is"   # best effort: awake while plugged in, only while this runs
+    ma=""; [ "$PC_PERMISSION_MODE" = default ] || ma="--permission-mode $PC_PERMISSION_MODE"
+    exec $keep "$claude" remote-control --name "$(derive_name "$root")" $ma ;;
 
   plan)
     if [ "$os" = Darwin ]; then svcfile="$agents_auto/com.pocket-claude.$PC_HUB_NAME.plist"; tmpdir="$agents_tmp"
@@ -457,6 +474,8 @@ hub       creates a folder:         $PC_HUB_DIR  (instructions + a small permiss
           approves that folder in:  $claude_json  (original saved once as .pocket-claude.bak)
 Logs (contain session links):       $logdir
 Sessions started from the phone:    temporary service files in $tmpdir, gone at logout/restart
+Keeps the computer awake only while plugged in (macOS; Linux desktops). A laptop with the lid closed still sleeps.
+$( [ "$os" = Linux ] && echo "Linux servers: run once so it survives logout:  sudo loginctl enable-linger ${USER:-$(id -un)}" )
 Never: sudo, shell startup files, open ports.
 EOF
     ;;
@@ -470,7 +489,7 @@ EOF
       [ -e "$f" ] || continue
       n=${f##*/}; n=${n%.dir}; found=1
       kind=session; [ "$n" = "$PC_HUB_NAME" ] && kind=launcher
-      if svc_running "$n"; then echo "$n  [$kind, running]  $(cat "$f")  $(session_url "$n")"
+      if ( svc_running "$n" ) 2>/dev/null; then echo "$n  [$kind, running]  $(cat "$f")  $(session_url "$n")"
       else echo "$n  [$kind, stopped]  $(cat "$f")"; fi
     done
     [ "$found" = 1 ] || echo "none" ;;
@@ -506,7 +525,7 @@ EOF
       lf=$(logf "$PC_HUB_NAME")
       [ ! -f "$lf" ] || [ "$(wc -c < "$lf")" -lt 52428800 ] || warn "launcher log is over 50 MB; restart it to clear it"
     else warn "launcher not set up yet"; fi
-    if [ "$os" = Linux ]; then
+    if [ "$os" = Linux ] && ! is_wsl; then
       ( linux_preflight ) 2>/dev/null && ok "user service manager reachable" || warn "user service manager not reachable"
       loginctl show-user "${USER:-$(id -un)}" -p Linger 2>/dev/null | grep -q yes && ok "linger on (launcher survives logout)" || warn "linger off: the launcher stops when you log out (sudo loginctl enable-linger ${USER:-$(id -un)})"
     fi
@@ -515,6 +534,8 @@ EOF
       warn "your Claude settings allow every shell command without asking; a phone session can then run anything"
     fi
     [ "$PC_PERMISSION_MODE" = default ] || warn "permission mode is '$PC_PERMISSION_MODE': the launcher's own instructions can be changed from the phone without asking"
+    ! is_wsl || warn "this is WSL: a background launcher can't stay up here; use  claude-spawn run <folder>  in a terminal you leave open"
+    [ "$os" != Darwin ] || ! pmset -g batt 2>/dev/null | grep -q InternalBattery || ok "laptop: keeps awake on power only; closing the lid pauses it"
     ok "projects folder: $PC_ROOT, approvals: $PC_PERMISSION_MODE" ;;
 
   uninstall)
