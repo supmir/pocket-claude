@@ -1,0 +1,261 @@
+#!/usr/bin/env bash
+# claude-spawn: run Claude Code Remote Control servers as background services.
+# macOS (launchd) and Linux (systemd --user). bash 3.2 compatible.
+set -euo pipefail
+
+os=$(uname -s)
+case "$os" in Darwin|Linux) ;; *) echo "Unsupported OS: $os (Windows: use claude-spawn.ps1)" >&2; exit 1 ;; esac
+
+cfgdir="${XDG_CONFIG_HOME:-$HOME/.config}/pocket-claude"
+cfgfile="$cfgdir/config"
+claude_json="${PC_CLAUDE_JSON:-$HOME/.claude.json}"
+
+# Config (KEY=value, sourced). Defaults apply until `claude-spawn init` runs.
+PC_ROOT="$HOME/Documents"
+PC_HUB_DIR=""
+PC_HUB_NAME="$(hostname -s)-hub"
+PC_TRUST_UNDER_ROOT=false
+[ -f "$cfgfile" ] && . "$cfgfile"
+[ -n "$PC_HUB_DIR" ] || PC_HUB_DIR="$PC_ROOT/pocket-claude-hub"
+
+uid=$(id -u)
+if [ "$os" = Darwin ]; then
+  logdir="$HOME/Library/Logs/pocket-claude"
+  agents_auto="$HOME/Library/LaunchAgents"                      # loaded at login (hub)
+  agents_tmp="$HOME/Library/Application Support/pocket-claude/agents"  # never auto-loaded (spawned)
+else
+  logdir="${XDG_STATE_HOME:-$HOME/.local/state}/pocket-claude/logs"
+  unitdir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+fi
+mkdir -p "$logdir"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  claude-spawn init <projects-root> <hub-dir> <hub-name> <trust: yes|no>
+      Save config (~/.config/pocket-claude/config).
+  claude-spawn hub
+      Create the hub dir (git repo + CLAUDE.md), trust it, install the
+      always-on hub service (restarts on failure, starts at login).
+  claude-spawn start <owner/repo | git-url | path> [dest]
+      Start a Remote Control server for a repo (cloned to <root>/<dest> if
+      not local) and print its claude.ai link. Transient: gone after reboot.
+  claude-spawn root | list | url <name> | stop <name>
+  claude-spawn trust <dir>
+      Mark a git repo as trusted in ~/.claude.json (same as accepting the dialog).
+EOF
+}
+
+logf() { echo "$logdir/$1.log"; }
+sid()  { echo "pocket-claude-$1"; }   # service id
+
+# ---------- service backends: svc_running, svc_install <name> <dir> <persistent>, svc_stop ----------
+if [ "$os" = Darwin ]; then
+  plist_for() { # name persistent(1|0)
+    if [ "$2" = 1 ]; then echo "$agents_auto/com.pocket-claude.$1.plist"; else echo "$agents_tmp/com.pocket-claude.$1.plist"; fi
+  }
+  svc_running() { launchctl print "gui/$uid/com.pocket-claude.$1" 2>/dev/null | grep -q 'state = running'; }
+  svc_stop() { launchctl bootout "gui/$uid/com.pocket-claude.$1" 2>/dev/null || true; }
+  svc_install() { # name dir persistent(1|0)
+    local claude p keep
+    claude=$(command -v claude) || { echo "claude not found in PATH" >&2; exit 1; }
+    mkdir -p "$agents_auto" "$agents_tmp"
+    p=$(plist_for "$1" "$3")
+    if [ "$3" = 1 ]; then keep='<key>RunAtLoad</key><true/><key>KeepAlive</key><true/>'
+    else keep='<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>'; fi
+    cat > "$p" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.pocket-claude.$1</string>
+  <key>ProgramArguments</key><array>
+    <string>/usr/bin/caffeinate</string><string>-is</string>
+    <string>$claude</string><string>remote-control</string>
+    <string>--name</string><string>$1</string>
+  </array>
+  <key>WorkingDirectory</key><string>$2</string>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key><string>$HOME</string>
+  </dict>
+  $keep
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>StandardOutPath</key><string>$(logf "$1")</string>
+  <key>StandardErrorPath</key><string>$(logf "$1")</string>
+</dict></plist>
+EOF
+    svc_stop "$1"
+    launchctl bootstrap "gui/$uid" "$p"
+  }
+  svc_restart() { launchctl kickstart -k "gui/$uid/com.pocket-claude.$1"; }
+  svc_list() { launchctl list | grep 'com.pocket-claude' || echo "none running"; }
+else
+  svc_running() { systemctl --user is-active --quiet "$(sid "$1").service"; }
+  svc_stop() { systemctl --user stop "$(sid "$1").service" 2>/dev/null || true; }
+  svc_install() { # name dir persistent(1|0)
+    local claude restart inh
+    claude=$(command -v claude) || { echo "claude not found in PATH" >&2; exit 1; }
+    mkdir -p "$unitdir"
+    if [ "$3" = 1 ]; then restart=always; else restart=on-failure; fi
+    inh=""; command -v systemd-inhibit >/dev/null && inh="$(command -v systemd-inhibit) --what=idle:sleep --why=claude-remote-control "
+    cat > "$unitdir/$(sid "$1").service" <<EOF
+[Unit]
+Description=Claude Code Remote Control ($1)
+After=network-online.target
+
+[Service]
+WorkingDirectory=$2
+Environment=PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=$inh$claude remote-control --name $1
+Restart=$restart
+RestartSec=30
+StandardOutput=append:$(logf "$1")
+StandardError=append:$(logf "$1")
+
+[Install]
+WantedBy=default.target
+EOF
+    systemctl --user daemon-reload
+    if [ "$3" = 1 ]; then systemctl --user enable "$(sid "$1").service" >/dev/null 2>&1; fi
+    systemctl --user restart "$(sid "$1").service"
+  }
+  svc_restart() { systemctl --user restart "$(sid "$1").service"; }
+  svc_list() { systemctl --user list-units --no-legend 'pocket-claude-*' | grep . || echo "none running"; }
+fi
+
+# ---------- helpers ----------
+session_url() {
+  { grep -oE 'https://claude\.ai/code\?environment=[A-Za-z0-9_]+' "$(logf "$1")" 2>/dev/null || true; } | tail -n 1
+}
+
+is_trusted() {
+  jq -e --arg p "$1" '.projects[$p].hasTrustDialogAccepted == true' "$claude_json" >/dev/null 2>&1
+}
+
+# Same effect as accepting the trust dialog. Atomic: running Claude processes also rewrite this file.
+trust() {
+  local tmp
+  [ -f "$claude_json" ] || echo '{}' > "$claude_json"
+  tmp=$(mktemp "$claude_json.XXXXXX")
+  jq --arg p "$1" '.projects[$p] = ((.projects[$p] // {}) + {hasTrustDialogAccepted: true})' \
+    "$claude_json" > "$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$claude_json"
+}
+
+wait_url() {
+  local i
+  for i in $(seq 30); do
+    [ -n "$(session_url "$1")" ] && return 0
+    sleep 1
+  done
+  return 1
+}
+
+repo_root() { git -C "$1" rev-parse --show-toplevel 2>/dev/null || echo "$1"; }
+
+# ---------- commands ----------
+cmd="${1:-}"
+case "$cmd" in
+  init)
+    [ $# -eq 5 ] || { usage; exit 1; }
+    case "$5" in yes) t=true ;; no) t=false ;; *) echo "trust must be yes or no" >&2; exit 1 ;; esac
+    mkdir -p "$cfgdir" "$2"
+    set -- "$1" "$(cd "$2" && pwd -P)" "$3" "$4" "$5"   # resolve symlinks (macOS /var -> /private/var)
+    cat > "$cfgfile" <<EOF
+PC_ROOT="$2"
+PC_HUB_DIR="$3"
+PC_HUB_NAME="$4"
+PC_TRUST_UNDER_ROOT=$t
+EOF
+    echo "Wrote $cfgfile" ;;
+
+  hub)
+    if [ ! -d "$PC_HUB_DIR/.git" ]; then
+      mkdir -p "$PC_HUB_DIR"
+      git -C "$PC_HUB_DIR" init -q
+      self="$0"; [ -L "$self" ] && self=$(readlink "$self")   # installed as an absolute symlink
+      tpl="$(cd "$(dirname "$self")" && pwd -P)/../templates/hub-CLAUDE.md"
+      sed -e "s|{{HUB_NAME}}|$PC_HUB_NAME|g" -e "s|{{ROOT}}|$PC_ROOT|g" "$tpl" > "$PC_HUB_DIR/CLAUDE.md"
+      git -C "$PC_HUB_DIR" add CLAUDE.md
+      git -C "$PC_HUB_DIR" -c user.name="${GIT_AUTHOR_NAME:-pocket-claude}" -c user.email="${GIT_AUTHOR_EMAIL:-pocket-claude@localhost}" \
+        commit -q -m "Initial hub CLAUDE.md"
+    fi
+    hubroot=$(cd "$PC_HUB_DIR" && pwd -P)
+    trust "$hubroot"
+    : > "$(logf "$PC_HUB_NAME")"
+    svc_install "$PC_HUB_NAME" "$hubroot" 1
+    if wait_url "$PC_HUB_NAME"; then echo "$PC_HUB_NAME: $(session_url "$PC_HUB_NAME")"
+    else echo "No session URL yet; check: $(logf "$PC_HUB_NAME")" >&2; exit 1; fi ;;
+
+  start)
+    src="${2:-}"
+    [ -n "$src" ] || { usage; exit 1; }
+    if [ -d "$src" ]; then
+      dir=$(cd "$src" && pwd -P)
+    else
+      dir="$PC_ROOT/${3:-$(basename "$src" .git)}"
+      if [ ! -d "$dir" ]; then
+        mkdir -p "$(dirname "$dir")"
+        slug='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
+        if [[ "$src" =~ $slug ]]; then gh repo clone "$src" "$dir"; else git clone "$src" "$dir"; fi
+      fi
+    fi
+    root=$(repo_root "$dir")
+    case "$root" in
+      "$PC_ROOT"/*) rel="${root#"$PC_ROOT"/}" ;;
+      *) rel=$(basename "$root") ;;
+    esac
+    name=$(printf '%s' "$rel" | tr '/' '-' | tr -c 'A-Za-z0-9_.-\n' '-')
+
+    if ! is_trusted "$root"; then
+      case "$root" in
+        "$PC_ROOT"/*)
+          if [ "$PC_TRUST_UNDER_ROOT" != true ]; then
+            echo "Not trusted yet: $root" >&2
+            echo "Auto-trust is off. Review the repo, then run: claude-spawn trust '$root'" >&2
+            echo "(or run claude there once from a terminal and accept the dialog)" >&2
+            exit 2
+          fi
+          echo "Trusting $root"
+          for f in .claude .mcp.json CLAUDE.md; do
+            [ -e "$root/$f" ] && echo "  note: repo ships $f; its settings, hooks and MCP servers will apply"
+          done
+          trust "$root" ;;
+        *)
+          echo "Not trusted yet: $root (only $PC_ROOT/* can be auto-trusted)" >&2
+          echo "Trust it once from a terminal: cd '$root' && claude  (accept, then /exit)" >&2
+          exit 2 ;;
+      esac
+    fi
+
+    if svc_running "$name"; then
+      echo "Already running: $name"
+    else
+      : > "$(logf "$name")"
+      svc_install "$name" "$root" 0
+      if ! wait_url "$name" && grep -q 'Workspace not trusted' "$(logf "$name")"; then
+        trust "$root"   # another claude process clobbered the entry; re-trust once
+        svc_restart "$name"
+        wait_url "$name" || true
+      fi
+    fi
+    url=$(session_url "$name")
+    if [ -n "$url" ]; then
+      echo "$name: $url"
+    elif grep -q 'already served' "$(logf "$name")"; then
+      svc_stop "$name"
+      echo "$root already has a Remote Control server (e.g. the hub); use that one." >&2
+      exit 3
+    else
+      echo "No session URL yet; check: $(logf "$name")" >&2
+      exit 1
+    fi ;;
+
+  trust) trust "$(repo_root "$(cd "${2:?dir}" && pwd -P)")"; echo "Trusted." ;;
+  root)  echo "$PC_ROOT" ;;
+  list)  svc_list ;;
+  url)   session_url "${2:?name}" ;;
+  stop)  svc_stop "${2:?name}" ;;
+  *) usage; exit 1 ;;
+esac
