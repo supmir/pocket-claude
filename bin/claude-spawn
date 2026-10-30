@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # claude-spawn: run Claude Code Remote Control servers as background services.
 # macOS (launchd) and Linux (systemd --user). bash 3.2 compatible.
-# Windows: claude-spawn.ps1.
+# Windows: not supported yet (use WSL).
 set -euo pipefail
 shopt -u patsub_replacement 2>/dev/null || true   # bash 5.2: '&' in a replacement would expand
 
 os=$(uname -s)
-case "$os" in Darwin|Linux) ;; *) echo "Unsupported OS: $os (Windows: use claude-spawn.ps1)" >&2; exit 1 ;; esac
+case "$os" in Darwin|Linux) ;; *) echo "Unsupported OS: $os (Windows: use WSL)" >&2; exit 1 ;; esac
 
 die() { echo "$1" >&2; exit "${2:-1}"; }
 
@@ -32,14 +32,17 @@ fi
 name_re='^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
 safe_name() { [[ "$1" =~ $name_re ]]; }
 safe_path() { case "$1" in *[\"\'\<\>\&\%\$\`\\]*|*$'\n'*) return 1 ;; esac; }
-safe_dest() { case "$1" in ""|/*|-*|..|../*|*/..|*/../*) return 1 ;; esac; safe_path "$1"; }
+safe_dest() { case "$1" in ""|/*|-*|.*|*/.*|*//*|*/) return 1 ;; esac; safe_path "$1"; }   # no dot parts: can't land in .claude/ or .git/
+safe_path "$HOME" || die "Your home folder path contains a character this tool can't handle safely."
 mode_ok() { case "$1" in default|acceptEdits|plan) return 0 ;; esac; return 1; }
 slug_re='^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$'
 url_re='^(https://|ssh://|git@)[^[:space:]]+$'
 
 # ---------- config: KEY=value lines, parsed (never sourced) ----------
 if [ -d "$HOME/Documents" ]; then PC_ROOT="$HOME/Documents"; else PC_ROOT="$HOME/projects"; fi
-PC_HUB_NAME="$(hostname -s | sed 's/[^A-Za-z0-9._-]/-/g')-hub"
+PC_MACHINE=$( (hostname -s 2>/dev/null || hostname 2>/dev/null || echo computer) | head -n 1 | sed 's/[^A-Za-z0-9._-]/-/g; s/^[-.]*//' | cut -c1-15)
+[ -n "$PC_MACHINE" ] || PC_MACHINE=computer
+PC_HUB_NAME="$PC_MACHINE-launcher"
 PC_TRUST_UNDER_ROOT=false   # advanced; off unless the user turns it on
 PC_PERMISSION_MODE=default
 if [ -f "$cfgfile" ]; then
@@ -49,7 +52,7 @@ if [ -f "$cfgfile" ]; then
     esac
   done < "$cfgfile"
 fi
-PC_HUB_DIR="$HOME/pocket-claude-hub"
+PC_HUB_DIR="$HOME/pocket-claude-launcher"
 safe_name "$PC_HUB_NAME" || die "Config problem: hub name '$PC_HUB_NAME' is not allowed (letters, digits, . _ - only). Fix with: claude-spawn set hub-name <name>"
 mode_ok "$PC_PERMISSION_MODE" || die "Config problem: permission mode '$PC_PERMISSION_MODE' is not allowed."
 safe_path "$PC_ROOT" || die "Config problem: projects folder path contains an unsupported character."
@@ -66,11 +69,13 @@ Usage:
   claude-spawn install          Copy these scripts to a stable folder (safe to re-run to upgrade)
   claude-spawn set <key> <val>  root <folder> | hub-name <name> | permission-mode default|acceptEdits|plan
                                 | trust-under-root yes|no
-  claude-spawn hub              Create + start the always-on hub (starts at login)
+  claude-spawn hub              Create + start the always-on launcher (starts at login)
   claude-spawn start <owner/repo | git-url | folder> [dest]
                                 Start a session for a repo; prints its claude.ai link. Gone after reboot.
+  claude-spawn run <folder>     Same, but in this terminal only: no background service, nothing left behind
+  claude-spawn plan             Show what 'install' and 'hub' will put on this computer, changing nothing
   claude-spawn list | url <name> | stop <name|all>
-  claude-spawn trust <folder>   Approve a repo to run sessions (only after the user has said yes)
+  claude-spawn trust <git-folder> Approve a repo to run sessions (only after the user has said yes)
   claude-spawn doctor           Check that everything is healthy
   claude-spawn uninstall [--hub-folder] [--config] [--logs]
 EOF
@@ -139,7 +144,7 @@ else
     [ -n "${XDG_RUNTIME_DIR:-}" ] || export XDG_RUNTIME_DIR="/run/user/$uid"
     [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ] || export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
     systemctl --user show-environment >/dev/null 2>&1 ||
-      die "NO_SERVICE_MANAGER: this computer's per-user service manager isn't reachable (a container, or a connection without a login session). Log in normally or via a fresh SSH session, then try again."
+      die "NO_SERVICE_MANAGER: this computer's per-user service manager isn't reachable (a container, or a connection without a login session). Log in normally or via a fresh SSH session, then try again. On a server you reach over SSH, an admin may first need: sudo loginctl enable-linger $USER"
   }
   svc_running() { linux_preflight; systemctl --user is-active --quiet "$(sid "$1").service"; }
   svc_stop() { linux_preflight; systemctl --user stop "$(sid "$1").service" 2>/dev/null || true; }
@@ -176,7 +181,7 @@ ExecStart=/bin/sh -c ': > "\$\$1"; shift; exec "\$\$@"' sh "$(logf "$1")" ${inh}
 Restart=$([ "$3" = 1 ] && echo always || echo on-failure)
 RestartSec=30
 StandardOutput=file:$(logf "$1")
-StandardError=file:$(logf "$1")
+StandardError=inherit
 
 [Install]
 WantedBy=default.target
@@ -218,29 +223,54 @@ manual_trust_msg() {
   echo "To approve it by hand: open a terminal, run  cd '$1' && claude  and choose Yes at the trust prompt, then type /exit." >&2
 }
 
-# Same effect as accepting the trust dialog. Backed up once per call, atomic, symlink-safe.
-# Returns 3 if jq is missing (caller shows the manual steps).
+# Same effect as accepting the trust dialog. Atomic, symlink-safe. Returns 3 if jq is missing
+# (caller shows the manual steps), 1 on any other failure. Callers run it as `trust x || rc=$?`,
+# which switches errexit off in here, so every step checks itself.
+# The first call keeps a copy of the original file (~/.claude.json.pocket-claude.bak).
 trust() {
   local cfg="$claude_json" tmp
-  [ "$1" != / ] && [ "$1" != "$HOME" ] || die "Refusing to trust '$1' (too broad)."
+  [ "$1" != / ] && [ "$1" != "$HOME" ] || { echo "Refusing to trust '$1' (too broad)." >&2; return 1; }
   command -v jq >/dev/null 2>&1 || return 3
   if [ -L "$cfg" ]; then
     cfg=$(readlink "$cfg")
     case "$cfg" in /*) ;; *) cfg="$(dirname "$claude_json")/$cfg" ;; esac
   fi
   if [ -f "$cfg" ]; then
-    jq -e . "$cfg" >/dev/null 2>&1 || die "~/.claude.json isn't valid JSON, so I'm not touching it."
-    cp -p "$cfg" "$cfg.pocket-claude.bak"
+    jq -e . "$cfg" >/dev/null 2>&1 || { echo "~/.claude.json isn't valid JSON, so I'm not touching it." >&2; return 1; }
+    [ -e "$cfg.pocket-claude.bak" ] || cp -p "$cfg" "$cfg.pocket-claude.bak" || return 1
   else
-    echo '{}' > "$cfg"
+    echo '{}' > "$cfg" || return 1
   fi
-  tmp=$(mktemp "$cfg.XXXXXX")
+  tmp=$(mktemp "$cfg.XXXXXX") || return 1
   if ! jq --arg p "$1" '.projects[$p] = ((.projects[$p] // {}) + {hasTrustDialogAccepted: true})' "$cfg" > "$tmp"; then
-    rm -f "$tmp"; die "Couldn't update ~/.claude.json; left it unchanged."
+    rm -f "$tmp"; echo "Couldn't update ~/.claude.json; left it unchanged." >&2; return 1
   fi
-  chmod 600 "$tmp"
-  mv "$tmp" "$cfg"
+  if ! { chmod 600 "$tmp" && mv "$tmp" "$cfg"; }; then
+    rm -f "$tmp"; echo "Couldn't update ~/.claude.json; left it unchanged." >&2; return 1
+  fi
   echo "$1" >> "$statedir/trusted.list"
+}
+
+# try_trust <folder>: returns only if trusting worked; otherwise prints why and exits.
+try_trust() {
+  local rc=0
+  trust "$1" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    3) echo "NOT_TRUSTED: 'jq' isn't installed, so I can't approve it automatically." >&2; manual_trust_msg "$1"; exit 2 ;;
+    *) exit 1 ;;
+  esac
+}
+
+# What a folder would be allowed to run, shown before anyone says yes.
+show_shipped() {
+  local f
+  for f in .claude/settings.json .claude/settings.local.json .mcp.json CLAUDE.md; do
+    [ -f "$1/$f" ] || continue
+    echo "--- $f (first lines) ---" >&2
+    head -c 700 "$1/$f" | strip_ansi >&2; echo >&2
+  done
+  [ ! -d "$1/.claude" ] || echo "--- .claude contains: $(ls -A "$1/.claude" | tr '\n' ' ')" >&2
 }
 
 # Fill {{HUB_NAME}} {{ROOT}} {{SPAWN}} in a template file (no sed: values are never interpreted).
@@ -257,8 +287,9 @@ fill() {
 derive_name() {
   local root="$1" rel name h
   if under_root "$root"; then rel=${root#"$PC_ROOT"/}; else rel=$(basename "$root"); fi
-  name=$(printf '%s' "$rel" | sed -e 's/[^A-Za-z0-9_.-]/-/g' -e 's/^[-.]*//' | cut -c1-48)
+  name=$(printf '%s' "$rel" | sed -e 's/[^A-Za-z0-9_.-]/-/g' -e 's/^[-.]*//' | cut -c1-40)
   [ -n "$name" ] || name=repo
+  name="$PC_MACHINE-$name"   # tells sessions apart when several computers use one account
   if [ -f "$statedir/$name.dir" ] && [ "$(cat "$statedir/$name.dir")" != "$root" ]; then
     h=$(printf '%s' "$root" | cksum | cut -d' ' -f1 | cut -c1-6)
     name="$name-$h"
@@ -305,40 +336,36 @@ case "$cmd" in
   hub)
     ensure_installed
     safe_path "$PC_HUB_DIR" || die "UNSUPPORTED_PATH: hub folder path '$PC_HUB_DIR' contains an unsupported character."
+    [ ! -L "$PC_HUB_DIR" ] || die "$PC_HUB_DIR is a symlink; I won't use it. Remove or rename it and try again."
     mkdir -p "$PC_HUB_DIR/.claude"
     [ -d "$PC_HUB_DIR/.git" ] || git -C "$PC_HUB_DIR" init -q
     fill "$share/templates/hub-CLAUDE.md" > "$PC_HUB_DIR/CLAUDE.md"
     # Lets the hub start/list/stop sessions without a phone tap each time. Deliberately NOT 'trust'.
     s="$share/bin/claude-spawn"
     printf '{\n  "permissions": {\n    "allow": [\n      "Bash(%s start:*)",\n      "Bash(%s list:*)",\n      "Bash(%s url:*)",\n      "Bash(%s stop:*)",\n      "Bash(%s doctor:*)"\n    ]\n  }\n}\n' "$s" "$s" "$s" "$s" "$s" > "$PC_HUB_DIR/.claude/settings.json"
-    git -C "$PC_HUB_DIR" add -A
+    git -c core.hooksPath=/dev/null -C "$PC_HUB_DIR" add -A
     git -C "$PC_HUB_DIR" diff --cached --quiet || git -C "$PC_HUB_DIR" \
-      -c commit.gpgsign=false -c user.name="${GIT_AUTHOR_NAME:-pocket-claude}" -c user.email="${GIT_AUTHOR_EMAIL:-pocket-claude@localhost}" \
+      -c core.hooksPath=/dev/null -c commit.gpgsign=false -c user.name="${GIT_AUTHOR_NAME:-pocket-claude}" -c user.email="${GIT_AUTHOR_EMAIL:-pocket-claude@localhost}" \
       commit -q -m "Update hub files"
     hubroot=$(cd "$PC_HUB_DIR" && pwd -P)
     if ! is_trusted "$hubroot"; then
-      rc=0; trust "$hubroot" || rc=$?
-      if [ "$rc" = 3 ]; then
-        echo "NOT_TRUSTED: the hub folder needs one approval, and 'jq' isn't installed to do it automatically." >&2
-        manual_trust_msg "$hubroot"; exit 2
-      fi
+      try_trust "$hubroot"
     fi
     svc_install "$PC_HUB_NAME" "$hubroot" 1
     echo "$hubroot" > "$statedir/$PC_HUB_NAME.dir"
     if wait_url "$PC_HUB_NAME"; then
       echo "$PC_HUB_NAME: $(session_url "$PC_HUB_NAME")"
       if [ "$os" = Linux ] && ! loginctl show-user "${USER:-$(id -un)}" -p Linger 2>/dev/null | grep -q yes; then
-        echo "NOTE: it will stop when you log out. To keep it running, run once:  sudo loginctl enable-linger ${USER:-$(id -un)}"
+        echo "NOTE: the launcher will stop when you log out. To keep it running, run once:  sudo loginctl enable-linger ${USER:-$(id -un)}"
       fi
     else
-      echo "NO_URL: the hub didn't start. Last lines of its log:" >&2
+      echo "NO_URL: the launcher didn't start. Last lines of its log:" >&2
       tail -n 5 "$(logf "$PC_HUB_NAME")" | strip_ansi >&2; exit 1
     fi ;;
 
   start)
     src="${2:-}"
     [ -n "$src" ] || { usage; exit 1; }
-    cloned=0
     if [ -d "$src" ]; then
       dir=$(cd "$src" && pwd -P)
     else
@@ -359,7 +386,7 @@ case "$cmd" in
         else
           die "BAD_SOURCE: '$src' isn't a folder, an owner/repo, or a git URL."
         fi
-        cloned=1
+        echo "$(cd "$dir" && pwd -P)" >> "$statedir/cloned.list"   # downloaded by us: never auto-trusted, not even on a later call
       fi
     fi
     root=$(repo_root "$dir")
@@ -367,18 +394,15 @@ case "$cmd" in
     name=$(derive_name "$root")
 
     if ! is_trusted "$root"; then
-      shipped=""
-      for f in .claude .mcp.json CLAUDE.md; do [ -e "$root/$f" ] && shipped="$shipped $f"; done
-      # Auto-trust is an advanced opt-in, and never applies to a repo that was just downloaded.
-      if [ "$PC_TRUST_UNDER_ROOT" = true ] && [ "$cloned" = 0 ] && under_root "$root"; then
+      # Auto-trust is an advanced opt-in, and never applies to a repo pocket-claude downloaded.
+      if [ "$PC_TRUST_UNDER_ROOT" = true ] && under_root "$root" && ! grep -qxF "$root" "$statedir/cloned.list" 2>/dev/null; then
         echo "Trusting $root"
-        [ -z "$shipped" ] || echo "  note: this repo ships:$shipped (its settings, hooks and MCP servers will apply)"
-        rc=0; trust "$root" || rc=$?
-        if [ "$rc" = 3 ]; then echo "NOT_TRUSTED: 'jq' isn't installed." >&2; manual_trust_msg "$root"; exit 2; fi
+        show_shipped "$root"
+        try_trust "$root"
       else
         echo "NOT_TRUSTED: $root hasn't been approved to run Claude sessions yet." >&2
-        [ -z "$shipped" ] || echo "It contains:$shipped. Those can run commands on this computer once approved, so look at them with the user first." >&2
-        echo "If the user says yes, run:  $here/claude-spawn trust '$root'" >&2
+        show_shipped "$root"
+        echo "Anything shown above can run commands on this computer once approved. Show the user, and only if they say yes, run:  $here/claude-spawn trust '$root'" >&2
         exit 2
       fi
     fi
@@ -409,9 +433,34 @@ case "$cmd" in
     d="${2:?folder}"
     [ -d "$d" ] || die "No such folder: $d"
     root=$(repo_root "$d")
-    rc=0; trust "$root" || rc=$?
-    if [ "$rc" = 3 ]; then echo "'jq' isn't installed, so I can't do this automatically." >&2; manual_trust_msg "$root"; exit 2; fi
+    [ -e "$root/.git" ] || [ "$root" = "$(cd "$PC_HUB_DIR" 2>/dev/null && pwd -P)" ] || die "Not a git project folder, so I won't approve it: $root"
+    try_trust "$root"
     echo "Trusted $root" ;;
+
+  run)  # this terminal only: no service, nothing persists
+    d="${2:?folder}"; [ -d "$d" ] || die "No such folder: $d"
+    root=$(repo_root "$d"); safe_path "$root" || die "UNSUPPORTED_PATH: '$root'"
+    is_trusted "$root" || { echo "NOT_TRUSTED: $root hasn't been approved yet (see: claude-spawn start)." >&2; show_shipped "$root"; exit 2; }
+    claude=$(claude_path); cd "$root"
+    if [ "$PC_PERMISSION_MODE" = default ]; then exec "$claude" remote-control --name "$(derive_name "$root")"; fi
+    exec "$claude" remote-control --name "$(derive_name "$root")" --permission-mode "$PC_PERMISSION_MODE" ;;
+
+  plan)
+    if [ "$os" = Darwin ]; then svcfile="$agents_auto/com.pocket-claude.$PC_HUB_NAME.plist"; tmpdir="$agents_tmp"
+    else svcfile="$unitdir/$(sid "$PC_HUB_NAME").service"; tmpdir="$unitdir"; fi
+    cat <<EOF
+install   copies the scripts to:    $share
+set       saves settings to:        $cfgfile
+hub       creates a folder:         $PC_HUB_DIR  (instructions + a small permissions file)
+          starts a background service: $svcfile
+          (starts at login, restarts itself if it stops)
+          approves that folder in:  $claude_json  (original saved once as .pocket-claude.bak)
+Logs (contain session links):       $logdir
+Sessions started from the phone:    temporary service files in $tmpdir, gone at logout/restart
+Never: sudo, shell startup files, open ports.
+EOF
+    ;;
+
 
   root) echo "$PC_ROOT" ;;
 
@@ -420,7 +469,7 @@ case "$cmd" in
     for f in "$statedir"/*.dir; do
       [ -e "$f" ] || continue
       n=${f##*/}; n=${n%.dir}; found=1
-      kind=session; [ "$n" = "$PC_HUB_NAME" ] && kind=hub
+      kind=session; [ "$n" = "$PC_HUB_NAME" ] && kind=launcher
       if svc_running "$n"; then echo "$n  [$kind, running]  $(cat "$f")  $(session_url "$n")"
       else echo "$n  [$kind, stopped]  $(cat "$f")"; fi
     done
@@ -434,13 +483,14 @@ case "$cmd" in
       for f in "$statedir"/*.dir; do
         [ -e "$f" ] || continue
         n=${f##*/}; n=${n%.dir}
-        [ "$n" = "$PC_HUB_NAME" ] || svc_stop "$n"
+        [ "$n" = "$PC_HUB_NAME" ] || { svc_remove "$n"; rm -f "$f"; }
       done
-      echo "Stopped all sessions (the hub keeps running)."
+      echo "Stopped all sessions (the launcher keeps running)."
     else
       safe_name "$n" || die "Bad name."
-      svc_stop "$n"
-      [ "$n" != "$PC_HUB_NAME" ] || echo "Hub stopped until you next log in. To remove it for good: claude-spawn uninstall"
+      if [ "$n" = "$PC_HUB_NAME" ]; then
+        svc_stop "$n"; echo "Launcher stopped until you next log in. To remove it for good: claude-spawn uninstall"
+      else svc_remove "$n"; rm -f "$statedir/$n.dir"; fi
     fi ;;
 
   doctor)
@@ -452,14 +502,19 @@ case "$cmd" in
     [ -x "$share/bin/claude-spawn" ] && ok "installed at $share" || warn "not installed (run: claude-spawn install)"
     [ -f "$here/../VERSION" ] && ok "version $(cat "$here/../VERSION")"
     if [ -f "$statedir/$PC_HUB_NAME.dir" ]; then
-      if ( svc_running "$PC_HUB_NAME" ) 2>/dev/null; then ok "hub '$PC_HUB_NAME' running: $(session_url "$PC_HUB_NAME")"; else warn "hub '$PC_HUB_NAME' is not running"; fi
+      if ( svc_running "$PC_HUB_NAME" ) 2>/dev/null; then ok "launcher '$PC_HUB_NAME' running: $(session_url "$PC_HUB_NAME")"; else warn "launcher '$PC_HUB_NAME' is not running"; fi
       lf=$(logf "$PC_HUB_NAME")
-      [ ! -f "$lf" ] || [ "$(wc -c < "$lf")" -lt 52428800 ] || warn "hub log is over 50 MB; restart the hub to clear it"
-    else warn "hub not set up yet"; fi
+      [ ! -f "$lf" ] || [ "$(wc -c < "$lf")" -lt 52428800 ] || warn "launcher log is over 50 MB; restart it to clear it"
+    else warn "launcher not set up yet"; fi
     if [ "$os" = Linux ]; then
       ( linux_preflight ) 2>/dev/null && ok "user service manager reachable" || warn "user service manager not reachable"
-      loginctl show-user "${USER:-$(id -un)}" -p Linger 2>/dev/null | grep -q yes && ok "linger on (hub survives logout)" || warn "linger off: hub stops when you log out (sudo loginctl enable-linger ${USER:-$(id -un)})"
+      loginctl show-user "${USER:-$(id -un)}" -p Linger 2>/dev/null | grep -q yes && ok "linger on (launcher survives logout)" || warn "linger off: the launcher stops when you log out (sudo loginctl enable-linger ${USER:-$(id -un)})"
     fi
+    if command -v jq >/dev/null 2>&1 && [ -f "$HOME/.claude/settings.json" ] &&
+       jq -e '(.permissions.allow // [] | any(. == "Bash" or . == "Bash(*)")) or .permissions.defaultMode == "bypassPermissions"' "$HOME/.claude/settings.json" >/dev/null 2>&1; then
+      warn "your Claude settings allow every shell command without asking; a phone session can then run anything"
+    fi
+    [ "$PC_PERMISSION_MODE" = default ] || warn "permission mode is '$PC_PERMISSION_MODE': the launcher's own instructions can be changed from the phone without asking"
     ok "projects folder: $PC_ROOT, approvals: $PC_PERMISSION_MODE" ;;
 
   uninstall)
@@ -483,6 +538,7 @@ case "$cmd" in
     fi
     rm -rf "$statedir"
     echo "Removed all pocket-claude services."
+    [ ! -e "$claude_json.pocket-claude.bak" ] || echo "A copy of your original ~/.claude.json from before pocket-claude is at $claude_json.pocket-claude.bak (delete it if you like)."
     rm -rf "$share" ;;   # last: this script may be running from here
 
   *) usage; exit 1 ;;

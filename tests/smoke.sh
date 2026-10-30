@@ -27,13 +27,14 @@ t "path rejects &"          "! safe_path 'a&b'"
 t "path allows spaces"      "safe_path 'My Projects/x'"
 t "dest rejects .."         "! safe_dest '../x' && ! safe_dest 'a/../b' && ! safe_dest '/abs' && ! safe_dest '-x'"
 t "dest allows acme/api"    "safe_dest acme/api"
+t "dest rejects dot parts"  "! safe_dest 'proj/.claude' && ! safe_dest '.git' && ! safe_dest 'a/.hidden/b'"
 t "mode allowlist"          "mode_ok acceptEdits && ! mode_ok bypassPermissions"
 
 PC_ROOT="$T/proj"; mkdir -p "$PC_ROOT/a/b-c" "$T/other/x"
-t "name under root"         "[ \"\$(derive_name \"$PC_ROOT/a/b-c\")\" = a-b-c ]"
-echo "$T/other/x" > "$statedir/x.dir"
+t "name under root"         "[ \"\$(derive_name \"$PC_ROOT/a/b-c\")\" = \"\$PC_MACHINE-a-b-c\" ]"
+echo "$T/other/x" > "$statedir/$PC_MACHINE-x.dir"
 n=$(derive_name "$T/elsewhere/x")
-t "collision gets a suffix" "[ \"\$n\" != x ] && case \"\$n\" in x-*) true ;; esac"
+t "collision gets a suffix" "[ \"\$n\" != \"\$PC_MACHINE-x\" ] && case \"\$n\" in \"\$PC_MACHINE\"-x-*) true ;; esac"
 
 PC_HUB_NAME='hub&name' PC_ROOT='/r&r'; printf '{{HUB_NAME}} {{ROOT}}\n' > "$T/tpl"
 t "template fill keeps &"   "[ \"\$(fill '$T/tpl')\" = 'hub&name /r&r' ]"
@@ -47,5 +48,8 @@ command -v jq >/dev/null && {
   t "trust keeps symlink"   "[ -L '$T/claude.json' ]"
   t "trust made backup"     "[ -f '$T/real.json.pocket-claude.bak' ]"
   t "trust refuses HOME"    "! (trust '$HOME') 2>/dev/null"
+  echo 'not json' > "$T/real.json"
+  rc=0; trust "$T/proj" 2>/dev/null || rc=$?
+  t "trust failure is not silent" "[ $rc -ne 0 ] && [ $rc -ne 3 ]"
 }
 exit $fail

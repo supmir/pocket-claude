@@ -7,38 +7,41 @@ Claude Code sessions on your computer. Whoever can sign in to your claude.ai acc
 your unlocked phone) can start sessions that run commands as you. Use two-step login, and lock
 your phone.
 
-## What it does and doesn't do
+## What it writes (`claude-spawn plan` prints the exact paths)
 
-- Writes: a background service, its scripts (`~/.local/share/pocket-claude` or the Windows/macOS equivalent), a settings file, logs, a `pocket-claude-hub` folder, and trust entries in `~/.claude.json` (backed up to `~/.claude.json.pocket-claude.bak` before each change; Windows never writes it).
+- Scripts: `~/.local/share/pocket-claude`; settings: `~/.config/pocket-claude/config`; state: `~/.local/state/pocket-claude`.
+- Logs (they contain the session link, treat it like a private URL): `~/Library/Logs/pocket-claude` (macOS) or `~/.local/state/pocket-claude/logs`.
+- The launcher service: a LaunchAgent in `~/Library/LaunchAgents` (macOS, label `com.pocket-claude.<computer>-launcher`) or a systemd user unit (Linux). It starts at login and restarts itself. Sessions started from the phone get temporary service files (macOS: `~/Library/Application Support/pocket-claude/agents`, Linux: the same systemd folder) that are never started at login.
+- `~/pocket-claude-launcher`: a git folder with instructions and a small permissions file. Setup runs `git init` and `git commit` there (with git hooks disabled).
+- Trust entries in `~/.claude.json`. Your original file is copied once to `~/.claude.json.pocket-claude.bak`; later changes are not backed up again.
 - Doesn't: use `sudo`, edit shell startup files, open listening ports, or send data anywhere. Network traffic is Claude's own, outbound to claude.ai.
-- Logs contain the session link. They are readable only by you where the system allows it. Treat the link like a private URL.
-- Remove everything: say "remove pocket-claude", or run `claude-spawn uninstall`.
+- Remove everything: say "remove pocket-claude", or run `claude-spawn uninstall`. Trust entries for approved projects stay in `~/.claude.json` (harmless; the uninstall lists them).
 
 ## Trust model
 
 A project's `.claude/` settings, hooks, `.mcp.json` and `CLAUDE.md` can run commands once the
 folder is trusted. pocket-claude:
 
-- trusts only its own hub folder automatically;
-- trusts any other folder only after you have said yes (the assistant is told to show you what the folder contains first);
-- never auto-trusts a project it has just downloaded;
+- trusts only its own launcher folder automatically;
+- trusts any other folder only after you say yes. The script prints the project's hooks, server commands and instructions first, and `claude-spawn trust` only accepts a git project folder;
+- never auto-trusts a project it downloaded, now or on a later call;
 - offers an advanced `set trust-under-root yes` that auto-trusts existing projects under your projects folder. Don't turn it on if you ever open projects you don't control.
 
-Limits you should know: the "yes" is relayed through the assistant, so a prompt-injected
-assistant could ask you for it; read what you're approving. Trust is keyed by folder path and
-doesn't expire, so a later `git pull` of malicious code into an approved project runs. The hub's
-own instructions live in a folder the hub can write to.
+The real second gate: the launcher is only allowed to run `start`, `list`, `url`, `stop` and `doctor` without asking. `trust` is deliberately not on that list, so **Claude Code itself asks you to confirm the approve command** on your phone. Read it.
+
+Limits you should know:
+- The "yes" is relayed through an assistant, so a prompt-injected assistant could ask you for it. Read what you're approving.
+- Trust is keyed by folder path and doesn't expire: a later `git pull` of malicious code into an approved project runs.
+- The launcher's own instructions live in a folder the launcher can write to. With the default permission mode that needs your approval; with `acceptEdits` it doesn't, so `acceptEdits` weakens this. `claude-spawn doctor` warns about it, and about a broad "allow all shell commands" setting in your own Claude settings.
+- Cloning over `ssh` or `git@` URLs offers your ssh agent to that server; only use hosts you know.
 
 ## Inputs
 
-Names, destinations, paths and settings are validated (allowlists; no `..`; git gets `--`;
-configuration is parsed, never executed). Paths containing quotes, `&`, `<`, `>`, `%`, `$`,
-backticks or backslashes are refused rather than escaped.
+Names, destinations, paths and settings are validated (allowlists; no `..`, no dot-folders such as `.claude`; git gets `--`; configuration is parsed, never executed). Paths containing quotes, `&`, `<`, `>`, `%`, `$`, backticks or backslashes are refused rather than escaped.
 
 ## Releases
 
-Releases are git tags (`v0.1.0` ...). The setup prompt in the README pins a tag. Prefer a tag
-over `main` if you're cautious, and read what changed before updating the plugin.
+Releases are git tags (`v0.1.0` ...). Tags can be moved by the repository owner and nothing is signed yet, so read the code (about 500 lines of bash) if you're cautious, and read what changed before updating.
 
 ## Reporting a vulnerability
 
