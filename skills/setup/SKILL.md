@@ -30,6 +30,7 @@ everything to a permanent place, so the temporary folder can be deleted afterwar
 
 1. Run `CS doctor` (read-only; it exits 1 if anything needs attention, which is normal before setup). Fix what's missing:
    - `claude` missing or not logged in with a claude.ai account: walk them through it step by step (open Terminal, type `claude`, then `/login`); don't just say "in a terminal". This feature does not work with API keys.
+   - Their plan: Remote Control needs a paid plan (Pro, Max, Team or Enterprise). On Team or Enterprise an admin must switch it on. "Remote Control is disabled by your organization's policy" means an admin hasn't; they'll need to ask. It also doesn't work on organisations with zero data retention.
    - `git` missing: say how to get it for their system.
    - `jq` missing (macOS 15+ already has it): used only to approve folders. On macOS with Homebrew `brew install jq` is fine to offer; on Linux give them `sudo apt install jq` (or the distro's equivalent) to run themselves. If they'd rather skip it, setup works with one manual step.
 2. Ask in one line if this is a work or school computer. If yes, say it installs a background service that starts at login, and that their organisation may not allow it; offer the no-service option: `CS run <project folder>` starts one session in this terminal only and leaves nothing behind. Stop there if they pick that.

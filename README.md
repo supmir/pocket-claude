@@ -17,7 +17,8 @@ The **launcher** is one small always-on session. You open it on your phone and t
 ## Before you start (30 seconds)
 
 - **Works on:** Mac (tested) and Linux (not tested yet). **Windows: not yet.** Windows users can try the no-install `run` mode inside WSL, see "Without a background service".
-- **You need Claude Code** signed in with a claude.ai plan that includes it (API keys don't work for this). In the Claude desktop app, that's the **Code** tab, next to Chat. If you don't see one, this isn't for you yet.
+- **You need a paid Claude plan** (Pro, Max, Team or Enterprise; not Free), signed in with your claude.ai account. API keys don't work for this. Claude Code is the **Code** tab in the Claude desktop app, next to Chat and Cowork, or you can type `claude` in a terminal.
+- **On a Team or Enterprise plan,** an admin must first switch on "Remote Control" in the Claude Code admin settings. If you see "Remote Control is disabled by your organization's policy", that's why.
 - **Your computer has to be awake.** It stays awake while plugged in. A desktop, Mac mini or server is ideal. A **laptop works with the lid open and plugged in**. Closing the lid, or running on battery, lets it sleep, and then your phone can't reach it. That's a limit of laptops, not something software can fix.
 - **Whoever can sign in to your claude.ai account (or picks up your unlocked phone) can work on this computer.** Turn on two-step login.
 - **Work or school computer?** Check with your IT team first: this installs a small program that starts when you log in, and some organisations don't allow that or have switched this feature off. You can still try the no-install mode below.

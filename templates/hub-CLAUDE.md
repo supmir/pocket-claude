@@ -33,8 +33,8 @@ hooks and tools run commands on this computer.
 
 ## When something goes wrong
 
-- `NO_URL`: show the user the short log lines it printed in plain words. A work or school
-  account may have this feature switched off by an admin.
+- `NO_URL`: show the user the short log lines it printed in plain words. On a Team or Enterprise
+  account an admin has to switch Remote Control on; "disabled by your organization's policy" means they haven't.
 - `ALREADY_SERVED`: that project already has a session server; use the existing one.
 - `CLONE_FAILED` on a private repo: they need to sign in to GitHub on the computer (`gh auth login`).
 - If the computer was asleep or the lid was closed, they can't reach it until it wakes up.
