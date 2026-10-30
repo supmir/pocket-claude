@@ -1,0 +1,12 @@
+{
+  "name": "pocket-claude",
+  "owner": { "name": "Amir Iskandar" },
+  "plugins": [
+    {
+      "name": "pocket-claude",
+      "source": "./",
+      "description": "Start Claude Code sessions on your own computer from your phone.",
+      "version": "0.1.0"
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "name": "pocket-claude",
+  "version": "0.1.0",
+  "description": "Start Claude Code sessions on your own computer from your phone. Say \"set up pocket-claude\" and it does the rest.",
+  "author": { "name": "Amir Iskandar" },
+  "homepage": "https://github.com/supmir/pocket-claude",
+  "repository": "https://github.com/supmir/pocket-claude",
+  "license": "MIT",
+  "keywords": ["remote-control", "phone", "background", "hub"]
+}

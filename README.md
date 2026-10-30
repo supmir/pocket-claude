@@ -1,67 +1,72 @@
 # pocket-claude
 
-Run [Claude Code](https://claude.com/claude-code) on your own computer and drive it from your phone.
+**Start Claude Code on your own computer from your phone.**
 
-An always-on **hub** (Claude Code Remote Control) runs on your Mac, Linux or Windows
-machine. Open claude.ai/code or the Claude app, pick the hub, and you get a session on
-that machine. Ask it "give me a session in `owner/repo`" and `claude-spawn` starts another
-Remote Control server for that repo and hands you the link.
+You, on your phone: *"give me a session in my website project"*
+Claude, a few seconds later: *"Here you go"* and a link. Tap it and you're working on the real project, on your own computer.
 
-- **Hub**: persistent. Restarts if it dies, starts at login.
-- **Spawned sessions**: transient. They stop on reboot or logout.
-- **macOS**: launchd + `caffeinate`. **Linux**: `systemd --user` + `systemd-inhibit`.
-  **Windows**: Task Scheduler + `SetThreadExecutionState`.
-
-> Not affiliated with or endorsed by Anthropic. "Claude" is their trademark.
-> Windows support is **experimental** (untested by the author). macOS is tested; Linux is
-> a straight systemd translation, so reports welcome.
+```
+phone (claude.ai or the Claude app)
+   └─▶ always-on helper on your computer ──▶ a session in whichever project you ask for
+```
 
 ## Install
 
-Clone this repo, open Claude Code in it, and say:
+You need [Claude Code](https://claude.com/claude-code) signed in with a **claude.ai account** (API keys don't work for this). Then:
 
-> Set this up.
-
-Claude follows [SETUP.md](SETUP.md): checks prerequisites, asks you a few questions
-(projects folder, hub location, trust preference, sleep behaviour), installs
-`claude-spawn`, starts the hub and gives you the link.
-
-## Requirements
-
-- Claude Code, logged in with a **claude.ai account** (Remote Control doesn't work with API keys)
-- `git`, `gh` (for cloning private repos), and `jq` (macOS/Linux)
-- The machine must stay awake and you must be logged in (see SETUP.md for per-OS options)
-
-## Security: read this
-
-Claude Code only runs Remote Control in folders you've **trusted**, and a trusted repo's
-`.claude/` settings, hooks, `.mcp.json` and `CLAUDE.md` all take effect, including running
-commands. At install you choose:
-
-- **Opt-in (recommended if you ever clone repos you don't control).** `claude-spawn` refuses
-  untrusted repos; you review them and run `claude-spawn trust <dir>`.
-- **Auto-trust under your projects folder.** Convenient when everything in there is yours
-  or your team's. It prints a note when a repo ships its own `.claude/`, `.mcp.json` or `CLAUDE.md`.
-
-Trust is written to `~/.claude.json` (`projects["<path>"].hasTrustDialogAccepted`), an
-undocumented internal file. It may change in a future Claude Code release; if it does,
-`claude-spawn` falls back to telling you to accept the dialog in a terminal.
-
-Anyone with access to your claude.ai account can drive sessions on your machine. Protect it.
-
-## Commands
+**Plugin (one step):** in Claude Code, run
 
 ```
-claude-spawn init <root> <hub-dir> <hub-name> <yes|no>   save config (yes = auto-trust under root)
-claude-spawn hub                                         create + start the always-on hub
-claude-spawn start <owner/repo | git-url | path> [dest]  session for a repo, prints the link
-claude-spawn list | url <name> | stop <name> | root
-claude-spawn trust <dir>                                 trust a repo (after you've reviewed it)
+/plugin install pocket-claude --marketplace supmir/pocket-claude
 ```
 
-Logs: macOS `~/Library/Logs/pocket-claude/`, Linux `~/.local/state/pocket-claude/logs/`,
-Windows `%LOCALAPPDATA%\pocket-claude\logs\`.
+then say **"set up pocket-claude"**.
 
-## License
+**Or paste this into Claude Code** (the terminal, or the Code tab of the Claude desktop app, not ordinary chat):
 
-MIT
+> Set up pocket-claude: clone https://github.com/supmir/pocket-claude (tag v0.1.0) into a temporary folder, read skills/setup/SKILL.md, and follow it.
+
+Claude asks one question, tells you in plain words what it will do, and gives you a link. That's the whole install. To undo everything later, say **"remove pocket-claude"**.
+
+## Know this first
+
+- **Your computer has to be awake.** It keeps itself awake while plugged in. **Closing a laptop lid pauses it** (lid open and plugged in, or an external display, works).
+- **Anyone who can sign in to your claude.ai account can open sessions on your computer.** Turn on two-step login.
+- **Sessions you start from your phone are temporary.** They stop when the computer restarts or you log out. The always-on helper comes back by itself.
+- **Work or school computers:** your organisation may have switched this off, and it may not allow background helpers. Ask first.
+- **Windows is experimental.** The maintainer hasn't tested it.
+
+## What it changes on your computer
+
+- One background helper that starts when you log in (macOS login item, Linux user service, Windows scheduled task).
+- A hidden folder with a few files, a `pocket-claude-hub` folder in your home folder, a small settings file, and logs.
+- It marks the hub folder as trusted in Claude's settings (`~/.claude.json`, backed up first). It marks other projects as trusted **only after you say yes**.
+- It never uses `sudo`, never edits your shell files, and opens no network ports. It sends nothing anywhere itself.
+
+## Safety, in short
+
+A project you open a session in can run its own settings, hooks and tools on your computer, which is why Claude Code asks you to trust a folder first. pocket-claude keeps that question with you: it shows what a project contains and asks before approving it, and never approves something it just downloaded on its own. Details in [SECURITY.md](SECURITY.md).
+
+## Commands (Claude runs these for you)
+
+```
+claude-spawn doctor           check everything is healthy
+claude-spawn list             what's running
+claude-spawn stop <name|all>  stop sessions
+claude-spawn set permission-mode default|acceptEdits|plan
+claude-spawn uninstall        remove it all
+```
+
+## Tested on
+
+| System | Status |
+|---|---|
+| macOS (Apple silicon) | Tested by the maintainer |
+| Linux (systemd) | Not tested yet; written carefully, reports welcome |
+| Windows | Not tested; expect rough edges (laptop lids, battery, OneDrive folders) |
+
+## If something goes wrong
+
+Say **"is pocket-claude working?"** in Claude Code. It runs a health check and explains the result in plain words. The usual causes are a sleeping computer, being logged out, or Claude being signed out.
+
+Not affiliated with or endorsed by Anthropic. MIT licensed.
