@@ -42,7 +42,7 @@ Names, destinations, paths and settings are validated (allowlists; no `..`, no d
 
 ## Releases
 
-Releases are git tags (`v0.1.0` ...). Tags can be moved by the repository owner and nothing is signed yet, so read the code (about 500 lines of bash) if you're cautious, and read what changed before updating.
+Releases are git tags (`v0.1.0` ...), and the README's paste-in install names an exact commit, which can't be moved. Tags can be moved by the repository owner and nothing is signed yet, so read the code (about 500 lines of bash) if you're cautious, and read what changed before updating.
 
 ## Reporting a vulnerability
 

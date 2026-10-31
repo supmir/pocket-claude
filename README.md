@@ -23,6 +23,22 @@ The **launcher** is one small always-on session. You open it on your phone and t
 - **Whoever can sign in to your claude.ai account (or picks up your unlocked phone) can work on this computer.** Turn on two-step login.
 - **Work or school computer?** Check with your IT team first: this installs a small program that starts when you log in, and some organisations don't allow that or have switched this feature off. You can still try the no-install mode below.
 
+## Install
+
+**Plugin (one step):** in Claude Code, run
+
+```
+/plugin install pocket-claude --marketplace supmir/pocket-claude
+```
+
+then say **"set up pocket-claude"**.
+
+**Or paste this** into a Claude **Code** session (the Code tab of the Claude desktop app, or type `claude` in a terminal). Not the Chat tab:
+
+> Set up pocket-claude: clone https://github.com/supmir/pocket-claude into a temporary folder, check out commit 6331f8bd02e36261e37a2681a310efaea43c5168, read skills/setup/SKILL.md, and follow it.
+
+Claude tells you in plain words what it will do, asks one question, and gives you a link. To undo everything later, say **"remove pocket-claude"**.
+
 ## Using it
 
 On your phone open claude.ai/code (or the Claude app, Code tab), pick the session named `<your-computer>-launcher`, and say *"give me a session in my website project"*. The first time for each project, Claude asks you to approve it (see Safety).
